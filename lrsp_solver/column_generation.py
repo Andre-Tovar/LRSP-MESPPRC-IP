@@ -150,6 +150,15 @@ class ColumnGenerationSolver:
                 "before LP optimality was proven."
             )
 
+        # Re-solve the LP after the loop so the reported root LP reflects every
+        # column that was added in the final pricing round.
+        if master.column_count > 0:
+            final_lp_start = perf_counter()
+            final_lp = master.solve(relax=True)
+            result.master_runtime += perf_counter() - final_lp_start
+            if final_lp.is_optimal:
+                result.final_master = final_lp
+
         if result.final_master is not None and result.final_master.is_optimal:
             result.root_lp_objective = result.final_master.objective
             if result.status == "not_solved":
