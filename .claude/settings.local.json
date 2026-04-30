@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($env:PATH = \"C:\\\\Users\\\\2027a\\\\.cache\\\\codex-runtimes\\\\codex-primary-runtime\\\\dependencies\\\\python;$env:PATH\"; cd \"c:\\\\Users\\\\2027a\\\\Desktop\\\\LRSP-MESPPRC-IP\\\\LRSP-MESPPRC-IP\"; python -m pytest tests/lrsp -x --tb=short 2>&1 | Select-Object -Last 80)",
+      "PowerShell($env:PATH = \"C:\\\\Users\\\\2027a\\\\.cache\\\\codex-runtimes\\\\codex-primary-runtime\\\\dependencies\\\\python;$env:PATH\"; python -m pip install pytest 2>&1 | Select-Object -Last 3)"
+    ]
+  }
+}
