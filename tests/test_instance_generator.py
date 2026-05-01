@@ -1,190 +1,280 @@
+from __future__ import annotations
+
+from math import sqrt
+
 import pytest
 
 from mespprc import (
-    CalibrationConfig,
     GeneratorConfig,
+    NodeType,
     Phase1Solver,
     Phase2DPSolver,
     Phase2IPSolver,
-    calibrate_instance,
-    generate_benchmark_instance,
     generate_instance,
 )
 
 
-def _reachable_from(start_node: int, successors: dict[int, list[int]]) -> set[int]:
-    seen = {start_node}
-    stack = [start_node]
-    while stack:
-        node_id = stack.pop()
-        for succ in successors.get(node_id, []):
-            if succ in seen:
-                continue
-            seen.add(succ)
-            stack.append(succ)
-    return seen
+def _euclidean(a: tuple[float, float], b: tuple[float, float]) -> float:
+    return sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)
 
 
-def _expected_zone_bucket(arc_kind: str, tail_zone: str, head_zone: str) -> str:
-    if arc_kind == "depot_connector":
-        return "depot"
-    if "city_center" in {tail_zone, head_zone}:
-        return "city"
-    return "suburban"
+def test_default_config_produces_validated_instance():
+    instance = generate_instance(GeneratorConfig(num_customers=8, seed=1))
+    instance.validate()
 
-
-def test_generated_instance_has_colocated_depot_nodes_and_valid_arc_dimensions() -> None:
-    generated = generate_instance(GeneratorConfig(num_customers=12, seed=7))
-    instance = generated.instance
-
-    assert generated.source_id != generated.sink_id
-    assert generated.coordinates[generated.source_id] == generated.coordinates[generated.sink_id]
-    assert (generated.source_id, generated.sink_id) not in generated.arc_kinds
-    assert generated.local_resource_names == ("route_time", "bus_capacity")
-    assert generated.global_resource_names == ("duty_time",)
+    assert len(instance.customers()) == 8
+    assert instance.source is not None
+    assert instance.sink is not None
     assert len(instance.local_limits) == 2
     assert len(instance.global_limits) == 1
 
-    direct_source_arcs = {
-        head_id
-        for (tail_id, head_id) in generated.arc_kinds
-        if tail_id == generated.source_id
-    }
-    direct_sink_predecessors = {
-        tail_id
-        for (tail_id, head_id) in generated.arc_kinds
-        if head_id == generated.sink_id
-    }
-    assert 0 < len(direct_source_arcs) < len(instance.customers())
-    assert 0 < len(direct_sink_predecessors) < len(instance.customers())
 
-    reachable_from_source = _reachable_from(generated.source_id, instance.out_neighbors)
-    reachable_to_sink = _reachable_from(generated.sink_id, instance.in_neighbors)
-    for customer_id in instance.customers():
-        assert customer_id in reachable_from_source
-        assert customer_id in reachable_to_sink
+def test_graph_is_fully_connected_in_the_mespprc_sense():
+    """
+    Customers are pairwise connected; source connects to every customer;
+    every customer connects to the sink. The source has no incoming arcs and
+    the sink has no outgoing arcs, which is what Phase 1 expects.
+    """
 
-    customer_count = len(instance.customers())
-    customer_customer_arc_count = sum(
-        1
-        for tail_id, head_id in generated.arc_kinds
-        if tail_id in instance.customers() and head_id in instance.customers()
-    )
-    assert customer_customer_arc_count < customer_count * (customer_count - 1)
+    n = 6
+    config = GeneratorConfig(num_customers=n, seed=2)
+    instance = generate_instance(config)
+    customers = instance.customers()
+    source = instance.source
+    sink = instance.sink
 
-    instance.validate()
+    expected_arc_count = 2 * n + n * (n - 1)
+    assert len(instance.arcs) == expected_arc_count
+
+    # source -> every customer
+    for c in customers:
+        assert (source, c) in instance.arcs
+    # every customer -> sink
+    for c in customers:
+        assert (c, sink) in instance.arcs
+    # customer-customer pairs
+    for tail in customers:
+        for head in customers:
+            if tail != head:
+                assert (tail, head) in instance.arcs
+
+    # negative space: no anything-into-source, no anything-out-of-sink, no
+    # source -> sink direct arc, no self-loops.
+    for (tail, head) in instance.arcs:
+        assert head != source
+        assert tail != sink
+        assert tail != head
+    assert (source, sink) not in instance.arcs
 
 
-def test_generated_arc_attributes_follow_deterministic_multipliers() -> None:
-    generated = generate_instance(GeneratorConfig(num_customers=10, seed=5))
-    instance = generated.instance
+def test_arc_costs_are_pure_euclidean_distance():
+    config = GeneratorConfig(num_customers=5, seed=3)
+    instance = generate_instance(config)
 
-    expected_time = {
-        ("local", "suburban"): 1.0,
-        ("local", "city"): 1.2,
-        ("arterial", "suburban"): 0.8,
-        ("arterial", "city"): 1.0,
-        ("depot_connector", "depot"): 1.0,
-    }
-    expected_burden = {
-        ("local", "suburban"): 1.0,
-        ("local", "city"): 1.3,
-        ("arterial", "suburban"): 0.8,
-        ("arterial", "city"): 0.9,
-        ("depot_connector", "depot"): 1.0,
-    }
-
-    for (tail_id, head_id), arc in instance.arcs.items():
-        tail = generated.coordinates[tail_id]
-        head = generated.coordinates[head_id]
-        distance = ((tail[0] - head[0]) ** 2 + (tail[1] - head[1]) ** 2) ** 0.5
-        arc_kind = generated.arc_kinds[(tail_id, head_id)]
-        zone_bucket = _expected_zone_bucket(
-            arc_kind,
-            generated.node_zones[tail_id],
-            generated.node_zones[head_id],
+    for (tail, head), arc in instance.arcs.items():
+        assert arc.cost >= 0.0
+        # Customer-customer arcs in opposite directions have equal cost
+        # because cost is purely euclidean distance.
+        if tail in instance.customers() and head in instance.customers():
+            assert arc.cost == pytest.approx(
+                instance.get_arc(head, tail).cost, abs=1e-9
+            )
+    # Source -> customer and customer -> sink across the same customer have
+    # equal cost (depot is at one place).
+    for c in instance.customers():
+        assert instance.get_arc(instance.source, c).cost == pytest.approx(
+            instance.get_arc(c, instance.sink).cost, abs=1e-9
         )
 
-        assert distance > 0.0
-        assert arc.cost == pytest.approx(distance * generated.config.cost_distance_multiplier)
-        assert arc.local_res[0] == pytest.approx(distance * expected_time[(arc_kind, zone_bucket)])
-        assert arc.local_res[1] == pytest.approx(distance * expected_burden[(arc_kind, zone_bucket)])
-        assert arc.global_res[0] == pytest.approx(arc.local_res[0])
+
+def test_arc_resource_model_matches_specification():
+    """
+    For arc (i, j):
+      route_time   = d / v + s(j)
+      bus_capacity = q(j)
+      duty_time    = d / v + s(j)
+    """
+
+    config = GeneratorConfig(
+        num_customers=4,
+        seed=4,
+        service_time_base=1.0,
+        service_time_slope_per_customer=0.0,
+        vehicle_speed=1.0,
+    )
+    instance = generate_instance(config)
+    customer_ids = set(instance.customers())
+
+    for (tail, head), arc in instance.arcs.items():
+        cost = arc.cost
+        route_time, bus_capacity = arc.local_res
+        duty_time = arc.global_res[0]
+
+        if head in customer_ids:
+            assert route_time == pytest.approx(cost / 1.0 + 1.0, abs=1e-9)
+            assert duty_time == pytest.approx(cost / 1.0 + 1.0, abs=1e-9)
+            assert bus_capacity > 0.0
+        else:
+            assert route_time == pytest.approx(cost, abs=1e-9)
+            assert duty_time == pytest.approx(cost, abs=1e-9)
+            assert bus_capacity == pytest.approx(0.0, abs=1e-9)
 
 
-def test_generator_is_reproducible_from_seed_and_replicate() -> None:
-    config = GeneratorConfig(num_customers=10, seed=11, replicate_id=3)
-    first = generate_instance(config)
-    second = generate_instance(config)
+def test_service_time_scales_linearly_with_customer_count():
+    small = GeneratorConfig(
+        num_customers=5,
+        seed=5,
+        service_time_base=0.0,
+        service_time_slope_per_customer=0.2,
+    )
+    large = GeneratorConfig(
+        num_customers=20,
+        seed=5,
+        service_time_base=0.0,
+        service_time_slope_per_customer=0.2,
+    )
+    assert small.service_time() == pytest.approx(1.0, abs=1e-9)
+    assert large.service_time() == pytest.approx(4.0, abs=1e-9)
 
-    assert first.coordinates == second.coordinates
-    assert first.node_zones == second.node_zones
-    assert first.arc_kinds == second.arc_kinds
-    assert first.instance.local_limits == second.instance.local_limits
-    assert first.instance.global_limits == second.instance.global_limits
-    assert sorted(first.instance.arcs) == sorted(second.instance.arcs)
+
+def test_resource_limit_formulas_are_what_we_advertise():
+    config = GeneratorConfig(
+        num_customers=10,
+        seed=42,
+        beta_route=2.0,
+        rho_capacity=4.0,
+        gamma_duty=0.8,
+    )
+    instance = generate_instance(config)
+    service_time = config.service_time()
+
+    customer_ids = instance.customers()
+    depot = instance.nodes[instance.source]
+    # Reconstruct distance-to-depot from arc costs (cost == euclidean distance).
+    distance_to_depot = {
+        cid: instance.get_arc(instance.source, cid).cost for cid in customer_ids
+    }
+    singleton_route_time = {
+        cid: 2.0 * distance_to_depot[cid] + service_time for cid in customer_ids
+    }
+    expected_route_time_limit = config.beta_route * max(singleton_route_time.values())
+
+    assert instance.local_limits[0] == pytest.approx(expected_route_time_limit, rel=1e-9)
+
+    # Capacity is non-negative and at least max demand.
+    demands = [
+        instance.get_arc(instance.source, cid).local_res[1] for cid in customer_ids
+    ]
+    assert instance.local_limits[1] >= max(demands) - 1e-9
+
+    expected_global = config.gamma_duty * sum(singleton_route_time.values())
+    assert instance.global_limits[0] == pytest.approx(expected_global, rel=1e-9)
+    del depot
 
 
-def test_calibration_produces_solver_compatible_instance() -> None:
-    raw = generate_instance(
+def test_same_seed_produces_identical_instances():
+    a = generate_instance(GeneratorConfig(num_customers=12, seed=99))
+    b = generate_instance(GeneratorConfig(num_customers=12, seed=99))
+    assert a.local_limits == b.local_limits
+    assert a.global_limits == b.global_limits
+    for key, arc in a.arcs.items():
+        other = b.arcs[key]
+        assert arc.cost == pytest.approx(other.cost, rel=1e-12)
+        assert list(arc.local_res) == pytest.approx(list(other.local_res), rel=1e-12)
+        assert list(arc.global_res) == pytest.approx(list(other.global_res), rel=1e-12)
+
+
+def test_different_seeds_produce_different_instances():
+    a = generate_instance(GeneratorConfig(num_customers=12, seed=1))
+    b = generate_instance(GeneratorConfig(num_customers=12, seed=2))
+    different = any(
+        a.arcs[key].cost != b.arcs[key].cost for key in a.arcs
+    )
+    assert different
+
+
+def test_each_customer_has_a_feasible_singleton_round_trip():
+    config = GeneratorConfig(num_customers=10, seed=7)
+    instance = generate_instance(config)
+    route_time_limit, capacity_limit = instance.local_limits
+
+    for cid in instance.customers():
+        forward = instance.get_arc(instance.source, cid)
+        backward = instance.get_arc(cid, instance.sink)
+        round_trip_route_time = forward.local_res[0] + backward.local_res[0]
+        round_trip_load = forward.local_res[1] + backward.local_res[1]
+        assert round_trip_route_time <= route_time_limit + 1e-9
+        assert round_trip_load <= capacity_limit + 1e-9
+
+
+def test_invalid_configurations_raise():
+    with pytest.raises(ValueError):
+        GeneratorConfig(num_customers=0)
+    with pytest.raises(ValueError):
+        GeneratorConfig(num_customers=5, beta_route=0.5)  # below 1.0
+    with pytest.raises(ValueError):
+        GeneratorConfig(num_customers=5, demand_min=0)
+    with pytest.raises(ValueError):
         GeneratorConfig(
             num_customers=5,
-            seed=2,
-            local_tightness=0.95,
-            global_tightness=0.95,
+            coordinate_min=0.0,
+            coordinate_max=10.0,
+            depot_coordinate=(50.0, 50.0),  # outside box
         )
-    )
-    calibrated = calibrate_instance(
-        raw,
-        CalibrationConfig(max_iterations=12, local_relaxation_factor=1.10, global_relaxation_factor=1.10),
+
+
+def test_full_pipeline_runs_phase1_and_both_phase2_solvers():
+    """Smoke test: a generated instance must be solvable end to end.
+
+    `gamma_duty=1.0` makes the all-singletons solution feasible by construction,
+    so the smoke test exercises the pipeline rather than the duty-time tightness
+    knob.
+    """
+
+    instance = generate_instance(
+        GeneratorConfig(num_customers=5, seed=11, gamma_duty=1.0)
     )
 
-    assert calibrated.calibration_report is not None
-    assert calibrated.calibration_report.converged
-    assert calibrated.calibration_report.topology_adjustments >= 0
-    assert (
-        calibrated.calibration_report.topology_adjustments
-        + calibrated.calibration_report.local_adjustments
-        + calibrated.calibration_report.global_adjustments
-        > 0
-    )
-    assert all(
-        final_limit >= initial_limit
-        for final_limit, initial_limit in zip(
-            calibrated.calibration_report.final_local_limits,
-            calibrated.calibration_report.initial_local_limits,
-        )
-    )
-    assert all(
-        final_limit >= initial_limit
-        for final_limit, initial_limit in zip(
-            calibrated.calibration_report.final_global_limits,
-            calibrated.calibration_report.initial_global_limits,
-        )
-    )
+    phase1 = Phase1Solver(instance)
+    phase1_result = phase1.solve()
+    assert phase1_result.feasible_routes, "Phase 1 produced no feasible routes."
 
-    phase1 = Phase1Solver(calibrated.instance).solve()
-    phase2_dp = Phase2DPSolver(calibrated.instance).solve(phase1.feasible_routes)
-    phase2_ip = Phase2IPSolver(calibrated.instance).solve(
-        phase1.feasible_routes,
+    dp = Phase2DPSolver(instance).solve(phase1_result.feasible_routes)
+    assert dp.is_feasible
+    assert dp.coverage_complete
+
+    ip = Phase2IPSolver(instance).solve(
+        phase1_result.feasible_routes,
         collect_diagnostics=False,
     )
+    assert ip.is_feasible
+    assert ip.coverage_complete
 
-    assert phase1.feasible_routes
-    assert phase2_dp.is_feasible
-    assert phase2_dp.coverage_complete
-    assert phase2_ip.is_feasible
-    assert phase2_ip.coverage_complete
-    assert phase2_dp.total_cost == phase2_ip.total_cost
+    assert dp.total_cost == pytest.approx(ip.objective_value, rel=1e-6, abs=1e-6)
 
 
-def test_generate_benchmark_instance_can_calibrate_in_one_call() -> None:
-    generated = generate_benchmark_instance(
-        GeneratorConfig(num_customers=5, seed=2, local_tightness=0.95, global_tightness=0.95),
-        calibrate=True,
-        calibration_config=CalibrationConfig(max_iterations=8),
+def test_node_types_match_id_layout():
+    config = GeneratorConfig(num_customers=4, seed=8)
+    instance = generate_instance(config)
+
+    assert instance.nodes[0].node_type == NodeType.SOURCE
+    assert instance.nodes[config.num_customers + 1].node_type == NodeType.SINK
+    for cid in range(1, config.num_customers + 1):
+        assert instance.nodes[cid].node_type == NodeType.CUSTOMER
+
+
+def test_depot_coordinate_can_be_relocated():
+    config = GeneratorConfig(
+        num_customers=5,
+        seed=13,
+        coordinate_min=0.0,
+        coordinate_max=100.0,
+        depot_coordinate=(0.0, 0.0),
     )
-
-    assert generated.calibration_report is not None
-    assert generated.calibration_report.converged
-    assert generated.calibration_report.topology_adjustments >= 0
+    instance = generate_instance(config)
+    # source -> customer and customer -> sink share the same depot endpoint,
+    # so the two arc costs are equal across every customer.
+    for c in instance.customers():
+        assert instance.get_arc(instance.source, c).cost == pytest.approx(
+            instance.get_arc(c, instance.sink).cost, abs=1e-9
+        )

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import mespprc
-import mespprc_c
+import ARCHIVED.mespprc_c as mespprc_c
 
 
 def build_small_instance(module) -> object:

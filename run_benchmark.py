@@ -3,18 +3,17 @@ from __future__ import annotations
 import argparse
 import math
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from statistics import fmean
 from time import perf_counter
 from typing import Iterable, List, Sequence
 
 from mespprc import (
-    CalibrationConfig,
     GeneratorConfig,
     Phase1Solver,
     Phase2DPSolver,
     Phase2IPSolver,
-    generate_benchmark_instance,
+    generate_instance,
 )
 
 
@@ -24,18 +23,17 @@ class BenchmarkConfig:
     Benchmark configuration for the benchmark harness.
 
     Timing boundaries:
-    - instance generation and optional calibration are untimed
+    - instance generation is untimed
     - timing starts immediately before Phase 1
     - timing stops immediately after Phase 2
 
     In `compare` mode:
-    - DP and IP use the same generated/calibrated instance per replicate
+    - DP and IP use the same generated instance per replicate
     - Phase 1 is run once because it is deterministic for the same instance
     - the same exported Phase 1 route pool is then passed to both Phase 2 solvers
     - fresh solver objects are still created for both Phase 2 methods
 
     In `ip_only` mode:
-    - the same untimed generation/calibration boundary is preserved
     - Phase 1 is still run once per replicate
     - only the IP Phase 2 pipeline is timed and reported
 
@@ -52,8 +50,6 @@ class BenchmarkConfig:
     objective_tolerance: float = 1e-6
     dp_max_n: int = 8
     max_n: int | None = None
-    calibrate_instances: bool = True
-    calibration_config: CalibrationConfig = field(default_factory=CalibrationConfig)
     show_plots: bool = True
     include_phase2_plot: bool = True
     save_plot_prefix: str | None = None
@@ -235,12 +231,9 @@ def run_single_replicate(
     replicate_index: int,
 ) -> ReplicateBenchmarkResult:
     seed = benchmark_config.seed_for(n_customers, replicate_index)
-    generated = generate_benchmark_instance(
+    instance = generate_instance(
         GeneratorConfig(num_customers=n_customers, seed=seed),
-        calibrate=benchmark_config.calibrate_instances,
-        calibration_config=benchmark_config.calibration_config,
     )
-    instance = generated.instance
 
     shared_phase1_run, phase1_result = run_shared_phase1(instance)
     if shared_phase1_run.error is not None:
@@ -705,13 +698,9 @@ def parse_args() -> BenchmarkConfig:
     parser.add_argument("--objective-tolerance", type=float, default=1e-6)
     parser.add_argument("--dp-max-n", type=int, default=8)
     parser.add_argument("--max-n", type=int, default=None)
-    parser.add_argument("--skip-calibration", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
     parser.add_argument("--skip-phase2-plot", action="store_true")
     parser.add_argument("--save-plot-prefix", type=str, default=None)
-    parser.add_argument("--calibration-max-iterations", type=int, default=15)
-    parser.add_argument("--local-relaxation-factor", type=float, default=1.10)
-    parser.add_argument("--global-relaxation-factor", type=float, default=1.10)
     args = parser.parse_args()
 
     return BenchmarkConfig(
@@ -723,12 +712,6 @@ def parse_args() -> BenchmarkConfig:
         objective_tolerance=args.objective_tolerance,
         dp_max_n=args.dp_max_n,
         max_n=args.max_n,
-        calibrate_instances=not args.skip_calibration,
-        calibration_config=CalibrationConfig(
-            max_iterations=args.calibration_max_iterations,
-            local_relaxation_factor=args.local_relaxation_factor,
-            global_relaxation_factor=args.global_relaxation_factor,
-        ),
         show_plots=not args.skip_plots,
         include_phase2_plot=not args.skip_phase2_plot,
         save_plot_prefix=args.save_plot_prefix,

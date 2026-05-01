@@ -1,13 +1,17 @@
 from .instance import Arc, MESPPRCInstance, Node, NodeType
-from .instance_generator import (
-    CalibrationConfig,
-    CalibrationIteration,
-    CalibrationReport,
-    GeneratedBenchmarkInstance,
-    GeneratorConfig,
-    calibrate_instance,
-    generate_benchmark_instance,
-    generate_instance,
+from .instance_database import (
+    DatabaseInstanceRecord,
+    iter_database_instances,
+    list_database_instances,
+    load_database_instance,
+    validate_database,
+)
+from .instance_generator import GeneratorConfig, generate_instance
+from .instance_io import (
+    instance_from_dict,
+    instance_to_dict,
+    load_instance_json,
+    write_instance_json,
 )
 from .label import (
     Label,
@@ -42,10 +46,7 @@ from .phase2_ip import (
 
 __all__ = [
     "Arc",
-    "CalibrationConfig",
-    "CalibrationIteration",
-    "CalibrationReport",
-    "GeneratedBenchmarkInstance",
+    "DatabaseInstanceRecord",
     "GeneratedRoute",
     "GeneratorConfig",
     "Label",
@@ -74,7 +75,13 @@ __all__ = [
     "RouteNetworkArc",
     "RouteNetworkNode",
     "TEMP_UNREACHABLE",
-    "calibrate_instance",
-    "generate_benchmark_instance",
     "generate_instance",
+    "instance_from_dict",
+    "instance_to_dict",
+    "iter_database_instances",
+    "list_database_instances",
+    "load_database_instance",
+    "load_instance_json",
+    "validate_database",
+    "write_instance_json",
 ]
